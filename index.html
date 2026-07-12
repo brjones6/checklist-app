@@ -289,7 +289,7 @@
   let currentUser = null;
   let unsubscribeSnapshot = null;
   let saveTimeout = null;
-  let suppressNextRenderSave = false;
+  let lastSentSnapshot = null; // deep copy of the last payload we sent to Firestore
 
   function id() {
     return Math.random().toString(36).slice(2, 10);
@@ -337,14 +337,18 @@
       if (snap.exists) {
         const data = snap.data();
         const incoming = { title: data.title || 'My Checklist', items: data.items || [] };
-        // Skip re-rendering if this update just echoes back what we already
-        // have locally (e.g. our own save completing) — re-rendering would
-        // rebuild the DOM and knock focus/cursor out of whatever input the
-        // user is actively typing in.
-        if (!statesEqual(incoming, state)) {
-          state = incoming;
-          render();
+        // Ignore updates that are just our own write echoing back (the local
+        // optimistic copy, then the server confirmation). Comparing against
+        // "state" isn't safe here, since the user may have kept typing after
+        // the save fired — applying a same-as-what-we-sent snapshot would
+        // stomp on those newer keystrokes and yank the cursor away. Instead
+        // compare against exactly what we last sent.
+        if (lastSentSnapshot && statesEqual(incoming, lastSentSnapshot)) {
+          syncStatusEl.textContent = 'synced';
+          return;
         }
+        state = incoming;
+        render();
       } else {
         state = { title: 'My Checklist', items: [] };
         docRef.set(state);
@@ -362,10 +366,15 @@
     syncStatusEl.textContent = 'saving…';
     clearTimeout(saveTimeout);
     saveTimeout = setTimeout(() => {
-      db.collection('checklists').doc(currentUser.uid).set(state)
+      // Snapshot the payload now, decoupled from further in-place edits to
+      // state.items — otherwise lastSentSnapshot would silently drift along
+      // with state and this whole comparison would be pointless.
+      const payload = JSON.parse(JSON.stringify({ title: state.title, items: state.items }));
+      lastSentSnapshot = payload;
+      db.collection('checklists').doc(currentUser.uid).set(payload)
         .then(() => { syncStatusEl.textContent = 'synced'; })
         .catch(err => { console.error(err); syncStatusEl.textContent = 'sync error — check console'; });
-    }, 400);
+    }, 5000);
   }
 
   // ---- Rendering ----
@@ -408,6 +417,12 @@
       text.addEventListener('input', () => {
         item.text = text.value;
         saveToFirestore();
+      });
+      text.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          text.blur(); // intentionally leaving the field — don't refocus it later
+        }
       });
 
       const colorDot = document.createElement('div');
@@ -460,6 +475,13 @@
   titleEl.addEventListener('input', () => {
     state.title = titleEl.value;
     saveToFirestore();
+  });
+
+  titleEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      titleEl.blur();
+    }
   });
 
   addBtn.addEventListener('click', () => {
