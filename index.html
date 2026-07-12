@@ -262,23 +262,11 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
+<!-- Your Firebase project config lives in its own file so updating this
+     app later never risks overwriting it. See firebase-config.js. -->
+<script src="firebase-config.js"></script>
 
 <script>
-  // =====================================================================
-  // STEP: paste your Firebase project config here (see deploy guide).
-  // Firebase Console > Project settings > General > Your apps > Web app
-  // =====================================================================
-const firebaseConfig = {
-  apiKey: "AIzaSyBzuJs6iEo4JF5pokcBu2FE0R-e7uircs8",
-  authDomain: "checklist-c3618.firebaseapp.com",
-  projectId: "checklist-c3618",
-  storageBucket: "checklist-c3618.firebasestorage.app",
-  messagingSenderId: "65621254991",
-  appId: "1:65621254991:web:19e2932e943041c543db3a",
-  measurementId: "G-V7J2JR85BG"
-};
-  // =====================================================================
-
   firebase.initializeApp(firebaseConfig);
   const auth = firebase.auth();
   const db = firebase.firestore();
@@ -332,18 +320,37 @@ const firebaseConfig = {
   });
 
   // ---- Firestore sync ----
+  function statesEqual(a, b) {
+    if (!a || !b) return false;
+    if (a.title !== b.title) return false;
+    if (a.items.length !== b.items.length) return false;
+    for (let i = 0; i < a.items.length; i++) {
+      const x = a.items[i], y = b.items[i];
+      if (!x || !y || x.id !== y.id || x.text !== y.text || x.done !== y.done || x.color !== y.color) return false;
+    }
+    return true;
+  }
+
   function subscribeToChecklist(uid) {
     const docRef = db.collection('checklists').doc(uid);
     unsubscribeSnapshot = docRef.onSnapshot(snap => {
       if (snap.exists) {
         const data = snap.data();
-        state = { title: data.title || 'My Checklist', items: data.items || [] };
+        const incoming = { title: data.title || 'My Checklist', items: data.items || [] };
+        // Skip re-rendering if this update just echoes back what we already
+        // have locally (e.g. our own save completing) — re-rendering would
+        // rebuild the DOM and knock focus/cursor out of whatever input the
+        // user is actively typing in.
+        if (!statesEqual(incoming, state)) {
+          state = incoming;
+          render();
+        }
       } else {
         state = { title: 'My Checklist', items: [] };
         docRef.set(state);
+        render();
       }
       syncStatusEl.textContent = 'synced';
-      render();
     }, err => {
       console.error(err);
       syncStatusEl.textContent = 'sync error — check console';
@@ -363,6 +370,16 @@ const firebaseConfig = {
 
   // ---- Rendering ----
   function render() {
+    // Remember what had focus (and cursor position) so a rebuild doesn't
+    // interrupt whatever the user is typing.
+    const active = document.activeElement;
+    let focusInfo = null;
+    if (active === titleEl) {
+      focusInfo = { id: '__title__', start: active.selectionStart, end: active.selectionEnd };
+    } else if (active && active.classList && active.classList.contains('item-text')) {
+      focusInfo = { id: active.dataset.id, start: active.selectionStart, end: active.selectionEnd };
+    }
+
     titleEl.value = state.title;
     listEl.innerHTML = '';
     emptyMsg.style.display = state.items.length ? 'none' : 'block';
@@ -387,6 +404,7 @@ const firebaseConfig = {
       text.type = 'text';
       text.value = item.text;
       text.placeholder = 'List item...';
+      text.dataset.id = item.id;
       text.addEventListener('input', () => {
         item.text = text.value;
         saveToFirestore();
@@ -424,6 +442,19 @@ const firebaseConfig = {
     const doneCount = state.items.filter(i => i.done).length;
     progressBar.style.width = total ? `${(doneCount / total) * 100}%` : '0%';
     progressLabel.textContent = `${doneCount} of ${total} complete`;
+
+    // Restore focus/cursor position after rebuilding the DOM.
+    if (focusInfo) {
+      const el = focusInfo.id === '__title__'
+        ? titleEl
+        : listEl.querySelector(`[data-id="${focusInfo.id}"]`);
+      if (el) {
+        el.focus();
+        if (typeof el.setSelectionRange === 'function') {
+          el.setSelectionRange(focusInfo.start, focusInfo.end);
+        }
+      }
+    }
   }
 
   titleEl.addEventListener('input', () => {
